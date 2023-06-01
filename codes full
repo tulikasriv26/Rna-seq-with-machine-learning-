@@ -1,0 +1,350 @@
+#load libraries
+library(dplyr)
+library(tidyr)
+library(cli)
+library(tidyverse)
+library(GEOquery)
+library(DESeq2)
+library(ggplot2)
+
+#read in sample information- metadata will have 
+metadata<- read.csv("C:/Users/metadata.csv")
+
+# gene expression data
+counts_data<-read.csv("C:/Users/count_data.csv")
+head(counts_data)
+
+#making sure column names in counts data and row names in metadata match
+all(colnames(counts_data)%in%rownames(metadata))
+all(colnames(counts_data)==rownames(metadata))
+
+#creating DESeq2 objects and round() since it convts to integers
+dds<-DESeqDataSetFromMatrix(countData = round(counts_data),
+                            colData = metadata_renames,
+                            design = ~tumor_stage)
+dds
+
+#pre-filtering: removing rows with low gene counts(lower than 10)
+keep<-rowSums(counts(dds))>=5
+keep
+dds<-dds[keep,]
+dds
+dds$tumor_stage<-relevel(dds$tumor_stage, ref="Metastatic")
+
+#running DESEQ2
+dds<-DESeq(dds)
+res0.09<-results(dds, alpha=0.09)
+res0.09
+summary(res0.09)
+plotMA(res0.09)
+res009<-as.data.frame(res0.09)
+ 
+
+
+
+
+#WGCNA
+#LOAD LIBRARIES
+#BiocManager::install("WGCNA")
+#install.packages("remotes")
+#remotes::install_github("kevinblighe/CorLevelPlot")
+library(WGCNA)
+library(DESeq2)
+library(GEOquery)
+library(tidyverse)
+library(CorLevelPlot)
+library(gridExtra)
+
+#load the dataset
+counts_data<-read.csv('C:/Users/dua_n/Desktop/Dissertation/count_data.csv')
+View(counts_data)
+#getting metadata
+phenoData<-read.csv('C:/Users/dua_n/Desktop/Dissertation/metadata.csv')
+head(phenoData)
+
+#making gene ids as row names
+rownames(phenoData) <- phenoData$geo_accession
+phenoData<-phenoData[,-4]
+View(phenoData)
+
+#making geo accession as row names in phenodata
+rownames(counts_data) <- counts_data$GeneID
+counts_data<-counts_data[,-1]
+
+gsg<-goodSamplesGenes(t(counts_data))
+summary(gsg)
+gsg$allOK
+#check how many genes are outliers
+table(gsg$goodGenes)
+
+#check the same for sample
+table(gsg$goodSamples)
+
+#exclude outlier genes from the data
+data<-counts_data[gsg$goodGenes == TRUE,]
+
+#detecting outliers using hierarchial clustering- method 1
+htree<-hclust(dist(t(counts_data)),method= 'average')
+plot(htree)
+
+#principle component analysis- method 2 to detect outliers
+pca<-prcomp(t(counts_data))
+pca_data<-pca$x
+View(pca_data)
+pca_data<- as.data.frame(pca_data)
+
+#calculating variance
+pca_var<-pca$sdev^2
+pca_var_percent<-round(pca_var/sum(pca_var)*100 , digits=2)
+pca_var_percent
+
+#creating a plot between PC1 and PC2 and labeling them as their percentage
+ggplot(pca_data, aes(PC1, PC2))+
+  geom_point()+
+  geom_text(label= row.names(pca_data))+
+  labs(x=paste0('PC1',pca_var_percent[1],'%'),
+       y=paste0('PC2',pca_var_percent[2],'%'))
+
+#exclude the samples with outliers
+samples_to_be_excluded<- c('GSM4313073','GSM4313082')
+data_subset<-counts_data[,!(colnames(counts_data) %in% samples_to_be_excluded)]
+View(data_subset)
+
+#excluding outliers from phenodata as well
+colData<-phenoData%>%
+  filter(!row.names(.)%in%samples_to_be_excluded)
+
+#making sure that col names and row names in pheno and counts is same
+all(colnames(data_subset)%in%rownames(colData))
+all(colnames(data_subset)==rownames(colData))
+
+#creating DESeq2 dataset
+dds<-DESeqDataSetFromMatrix(countData = data_subset,
+                            colData = colData,
+                            design = ~ 1) #not specifying design
+dds
+
+dds75<-dds[rowSums(counts(dds) >=15) >=6,]
+nrow(dds75)
+
+#performing variance stabilization
+dds_norm<-vst(dds75)
+
+norm_counts<-assay(dds_norm)%>%
+  t()
+View(norm_counts)
+
+#NETWORK CONSTRUCTION
+#choosing soft threshold values.
+power<-c(c(1:10),seq(from=12, to=50, by=2))
+power
+
+#calling network topology analysis function
+sft<-pickSoftThreshold(norm_counts,
+                  powerVector = power,
+                  networkType = 'signed',
+                  verbose=5)
+
+sft_data<-sft$fitIndices
+View(sft_data)
+
+#visualize to pick a power- soft threshold value
+a1<-ggplot(sft_data, aes(Power,SFT.R.sq, label= Power))+
+  geom_point()+
+  geom_text(nudge_y = 0.1)+
+  geom_hline(yintercept= 0.8, color='red')+
+  labs(x='Power',y='scale free topology fit, signed R^2')+
+  theme_classic()
+
+#plot for mean connectivity
+a2<-ggplot(sft_data, aes(Power,mean.k., label=Power))+
+  geom_point()+
+  geom_text(nudge_y = 0.1)+
+  labs(x='Power',y='mean connectivity')+
+  theme_classic()
+
+grid.arrange(a1, a2, nrow=2)
+
+norm_counts[]<-sapply(norm_counts, as.numeric)
+soft_power<-28
+temp_cor<-cor
+cor<-WGCNA::cor
+
+bwnet<- blockwiseModules(norm_counts,
+                 maxBlockSize = 22000,
+                 TOMType = 'signed',
+                 power=soft_power,
+                 mergeCutHeight = 0.25,
+                 numericLabels = FALSE,
+                 randomSeed = 1234,
+                 verbose = 3)
+cor<-temp_cor
+
+#module eigengene information
+module_eigengenes<-bwnet$MEs
+head(module_eigengenes)
+View(module_eigengenes)
+modules<-table(bwnet$colors)
+View(modules)
+plotDendroAndColors(bwnet$dendrograms[[1]], 
+                    cbind(bwnet$unmergedColors, bwnet$colors),
+                    c('unmerged', 'merged'),
+                    dendroLabels = FALSE,
+                    addGuide = TRUE,
+                    hang = 0.03,
+                    guideHang = 0.05)
+
+# create traits file - binarize categorical variables
+traits <- colData%>%
+  mutate(tumor_stage_bin = ifelse(grepl('Metastatic', tumor_stage), 1, 0))%>%
+  select(4)
+
+# Define numbers of genes and samples
+nSamples <- nrow(norm_counts)
+nGenes <- ncol(norm_counts)
+module.trait.corr <- cor(module_eigengenes, traits, use = 'p')
+module.trait.corr.pvals <- corPvalueStudent(module.trait.corr, nSamples)
+
+# visualize module-trait association as a heatmap
+heatmap.data <- merge(module_eigengenes, traits, by = 'row.names')
+head(heatmap.data)
+heatmap.data <- heatmap.data %>% 
+  column_to_rownames(var = 'Row.names')
+
+CorLevelPlot(heatmap.data,
+             x = names(heatmap.data)[65],
+             y = names(heatmap.data)[1:64],
+             col = c("blue1", "skyblue", "white", "pink", "red"))
+
+
+module.membership.measure <- cor(module_eigengenes, norm_counts, use = 'p')
+module.membership.measure.pvals <- corPvalueStudent(module.membership.measure, nSamples)
+
+module.membership.measure.pvals %>% 
+  as.data.frame() %>% 
+  head(25)
+
+module.membership.measure.pvals[1:10,1:10]
+
+gene.signf.corr <- cor(norm_counts, traits$tumor_stage_bin, use = 'p')
+gene.signf.corr.pvals <- corPvalueStudent(gene.signf.corr, nSamples)
+
+gene.signf.corr.pvals %>% 
+  as.data.frame() %>% 
+  arrange(V1) %>% 
+  head(25)
+
+
+#MLSeq
+#loading the package
+BiocManager::install("MLSeq")
+BiocManager::install("S4Vectors")
+library("MLSeq")
+library("S4Vectors")
+library(DESeq2)
+library(MLmetrics)
+ 
+#setting path and loading file
+setwd("C:/Users")
+ 
+#loading complete data
+mydata <- read.csv("C:/Users/count_data.csv", header=TRUE)
+ 
+#CREATING CLASS DATA
+#creating a variable class which will contain our labels
+class_df <- data.frame(condition = factor(rep(c("M","N"), c(5, 5))))
+rownames(class_df) <- c("GSM4313065", "GSM4313067", "GSM4313069","GSM4313071","GSM4313073","GSM4313075","GSM4313077","GSM4313079","GSM4313081","GSM4313082")  
+View(class_df)
+ 
+ 
+##SPLITTING THE DATA
+set.seed(2128)
+n_df <- ncol(subset_df)
+p_df <- nrow(subset_df)
+ 
+ 
+nTest_df <- ceiling(n_df*0.3)
+ind_df <- sample(n_df, nTest_df, FALSE)
+ 
+ 
+rownames_df <- rownames(subset_df)
+data.train_df <- as.matrix(subset_df[ ,-ind_df] + 1)
+rownames(data.train_df) <- rownames_df
+ 
+rownames_df <- rownames(subset_df)
+data.test_df <- as.matrix(subset_df[ ,ind_df] + 1)
+rownames(data.test_df) <- rownames_df 
+ 
+classtr_df <- data.frame(condition = class_df[-ind_df, ], row.names = row.names(class_df)[-ind_df])
+classts_df <- data.frame(condition = class_df[ind_df, ], row.names = row.names(class_df)[ind_df])
+ 
+#creating input training set for ML using DESeq object
+data.trainS4_sub <- DESeqDataSetFromMatrix(countData = data.train_df,
+                                   	colData = classtr_df,
+                                  	 formula(~1))
+ 
+#creating input testing set for ML using DESeq object
+data.testS4_sub = DESeqDataSetFromMatrix(countData = data.test_df,
+                                 	colData = classts_df,
+                                 	design = formula(~1))
+ 
+set.seed(2128)
+ 
+#rf-classifier
+#normalization-deseq
+#transformation-vst
+rf_sub <- classify(data = data.trainS4_sub,
+           	method = "rf",
+           	preProcessing = "deseq-vst",
+           	ref = "N",
+           	control = trainControl(method = "repeatedcv",
+                                  	number = 5,
+                                  	repeats = 2,
+                                      classProbs = TRUE))
+ 
+rf_sub
+MLSeq::plot(rf_sub)
+trained(rf_sub)
+ 
+#Predictions
+pred.rf_sub <- predict(rf_sub,
+                   	data.testS4_sub)
+pred.rf_sub
+ 
+pred.rf_sub <- relevel(pred.rf_sub,
+                   	ref = "N")
+actual.rf_sub <- relevel(classts_df$condition,
+                     	ref = "N")
+tbl.rf_sub <- table(Predicted = pred.rf_sub,
+                	Actual = actual.rf_sub)
+confusionMatrix(tbl.rf_sub,
+            	positive = "N")
+ 
+ 
+ 
+set.seed(1235)
+ 
+#MODEL OPTIMIZATION
+# Support vector machines with radial basis function kernel
+#classifier-svm
+#normalization-deseq
+#transformation-vst
+set.seed(1236)
+fit.svm_sub <- classify(data = data.trainS4_sub,
+                	method = "svmRadial",
+                	preProcessing = "deseq-vst",
+                	ref = "N",
+                	tuneLength = 10,
+               	      control = trainControl(method ="repeatedcv", number = 5,repeats = 10,classProbs = TRUE))
+show(fit.svm_sub)
+trained(fit.svm_sub)
+plot(fit.svm_sub)
+ 
+#Predictions
+pred.fit.svm_sub <- predict(fit.svm_sub, data.testS4_sub)
+pred.fit.svm_sub
+ 
+pred.fit.svm_sub <- relevel(pred.fit.svm_sub, ref = "N")
+actual.fit.svm_sub <- relevel(classts_df$condition, ref = "N")
+tbl.fit.svm_sub <- table(Predicted = pred.fit.svm_sub, Actual =actual.fit.svm_sub)
+confusionMatrix(tbl.fit.svm_sub, positive = "N")
